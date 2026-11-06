@@ -483,14 +483,16 @@ int main(int argc, char* argv[])
 {
     std::cout << "================================================\n"
               << "  File Encryption Tool  |  github: hemanathan115\n"
-              << "  AES-256-CBC + SHA-256 + RSA-2048 (OpenSSL)\n"
+              << "  AES-256-GCM + PBKDF2 + RSA-2048 (OpenSSL)\n"
               << "================================================\n\n";
 
-    if (argc < 3)
+    if (argc < 3 && !(argc == 2 && std::string(argv[1]) == "self-test"))
     {
         std::cerr << "Usage:\n"
                   << "  " << argv[0] << " encrypt <input>  <output>\n"
                   << "  " << argv[0] << " decrypt <input>  <output>\n"
+                  << "  " << argv[0] << " decrypt-legacy <input> <output>\n"
+                  << "  " << argv[0] << " self-test\n"
                   << "  " << argv[0] << " verify  <file>\n"
                   << "  " << argv[0] << " genrsa  <priv.pem> <pub.pem>\n";
         return 1;
@@ -500,11 +502,17 @@ int main(int argc, char* argv[])
 
     try
     {
-        if (cmd == "encrypt" && argc == 4)
+        if (cmd == "self-test" && argc == 2)
+            crypto_self_test();
+
+        else if (cmd == "encrypt" && argc == 4)
             encrypt_file(argv[2], argv[3]);
 
         else if (cmd == "decrypt" && argc == 4)
             decrypt_file(argv[2], argv[3]);
+
+        else if (cmd == "decrypt-legacy" && argc == 4)
+            decrypt_legacy_file(argv[2], argv[3]);
 
         else if (cmd == "verify" && argc == 3)
             verify_file(argv[2]);
