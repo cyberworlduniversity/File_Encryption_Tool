@@ -1,210 +1,84 @@
-# 🔐 File Encryption Tool
+# File Encryption Tool
 
+C++17 command-line file encryption using OpenSSL.
 
-## Get this repository
+## Security design
 
-Clone the current project (this repository's canonical GitHub URL), then follow the installation and usage steps below.
+New files use **AES-256-GCM authenticated encryption** with:
+- 12-byte random nonce and 16-byte authentication tag
+- 16-byte random salt
+- PBKDF2-HMAC-SHA-256 with 600,000 iterations
+- Authenticated file metadata (format marker, salt, and nonce)
 
-```bash
-git clone https://github.com/cyberworlduniversity/File_Encryption_Tool.git
-cd File_Encryption_Tool
-```
+The program verifies the GCM tag before writing decrypted plaintext. A wrong password or modified encrypted file is rejected.
 
-> **Author:** hemanathan115  
-> **Language:** C++17  
-> **Library:** OpenSSL  
-> **Algorithms:** AES-256-CBC · RSA-2048 · SHA-256
+## Build
 
----
+Install a C++17 compiler and OpenSSL development headers.
 
-## 📖 Overview
-
-A command-line file encryption tool built in C++ using the OpenSSL library.  
-It provides strong, industry-standard encryption for any file on your system, with built-in integrity checking so you can be sure a decrypted file has not been tampered with.
-
----
-
-## 🔑 Cryptography Used
-
-| Algorithm | Purpose | Details |
-|-----------|---------|---------|
-| **AES-256-CBC** | File encryption / decryption | 256-bit key, random IV, PKCS#7 padding |
-| **SHA-256** | Integrity check | Hash of plaintext stored in encrypted file header |
-| **PBKDF2 / HMAC-SHA-256** | Key derivation | 100 000 iterations, 16-byte random salt |
-| **RSA-2048** | Asymmetric key utility | Key-pair generation helper |
-
----
-
-## 📁 Project Structure
-
-```
-File_Encryption_Tool/
-├── File_Encryption_Tool.cpp   # Full source code
-└── README.md                  # This file
-```
-
----
-
-## ⚙️ Prerequisites
-
-### Install OpenSSL development headers
-
-**Ubuntu / Debian**
-```bash
+Ubuntu / Debian:
+\`\`\`bash
 sudo apt-get update
-sudo apt-get install libssl-dev
-```
+sudo apt-get install -y g++ libssl-dev
+\`\`\`
 
-**Fedora / RHEL**
-```bash
-sudo dnf install openssl-devel
-```
+Compile:
+\`\`\`bash
+g++ -std=c++17 -O2 -Wall -Wextra File_Encryption_Tool.cpp -lssl -lcrypto -o file_enc
+\`\`\`
 
-**macOS (Homebrew)**
-```bash
-brew install openssl
-```
+## Commands
 
----
-
-## 🔨 Compile
-
-```bash
-g++ -std=c++17 -O2 File_Encryption_Tool.cpp \
-    -lssl -lcrypto -o file_enc
-```
-
-On macOS you may need to point the compiler at Homebrew's OpenSSL:
-```bash
-g++ -std=c++17 -O2 File_Encryption_Tool.cpp \
-    -I$(brew --prefix openssl)/include \
-    -L$(brew --prefix openssl)/lib \
-    -lssl -lcrypto -o file_enc
-```
-
----
-
-## 🚀 Usage
-
-### Encrypt a file
-```bash
+Encrypt a file (password entry is hidden):
+\`\`\`bash
 ./file_enc encrypt secret.txt secret.enc
-```
-You will be prompted to enter and confirm a password (input is hidden).
+\`\`\`
 
-### Decrypt a file
-```bash
+Decrypt a new FENC2 file:
+\`\`\`bash
 ./file_enc decrypt secret.enc recovered.txt
-```
-Enter the same password used during encryption.
+\`\`\`
 
-### Verify file integrity (SHA-256)
-```bash
-./file_enc verify secret.txt
-```
-Prints the SHA-256 hash of any file.
+Run the built-in cryptographic round-trip and tamper-detection test:
+\`\`\`bash
+./file_enc self-test
+\`\`\`
 
-### Generate RSA-2048 key pair
-```bash
+Generate an RSA-2048 key pair:
+\`\`\`bash
 ./file_enc genrsa private.pem public.pem
-```
+\`\`\`
 
----
+Calculate a SHA-256 digest of a file:
+\`\`\`bash
+./file_enc verify secret.txt
+\`\`\`
 
-## 📦 Encrypted File Format
+## Encrypted file format
 
-Every `.enc` file produced by this tool has the following binary layout:
+FENC2 files contain:
 
-```
-[ MAGIC  5 bytes  ]  "FENC1"  – identifies the file format
-[ SALT   16 bytes ]  Random salt for PBKDF2 key derivation
-[ HASH   32 bytes ]  SHA-256 of the original plaintext
-[ CIPHER n bytes  ]  AES-256-CBC ciphertext (PKCS#7 padded)
-```
+\`\`\`
+[MAGIC: 5 bytes][SALT: 16][NONCE: 12][GCM TAG: 16][CIPHERTEXT]
+\`\`\`
 
----
+The magic, salt, and nonce are authenticated as additional data. The plaintext hash from the old design is no longer used as an integrity mechanism.
 
-## ✅ Features
+## Legacy FENC1 files
 
-- **File Encryption** – AES-256-CBC with a password-derived key
-- **Secure Password Input** – Terminal echo is disabled while typing
-- **Decryption** – Fully reverses the encryption process
-- **Integrity Check** – SHA-256 hash verified on every decryption
-- **RSA Key Generation** – 2048-bit key pair for asymmetric use cases
-- **Cross-platform** – Linux & macOS (any POSIX system with OpenSSL)
+Older FENC1 files used AES-256-CBC with an unkeyed SHA-256 checksum. That format does **not** provide authenticated integrity. Normal \`decrypt\` refuses FENC1 files. If you must recover a trusted legacy file, use:
 
----
+\`\`\`bash
+./file_enc decrypt-legacy old-file.enc recovered.txt
+\`\`\`
 
-## 🛡️ Security Notes
+This command prints a warning. Do not use legacy recovery on files from untrusted sources; a checksum match is not proof against malicious tampering. Re-encrypt recovered data into FENC2.
 
-- Passwords are never stored; only the derived key (in memory) is used.
-- A fresh random salt is generated for every encryption operation.
-- 100 000 PBKDF2 iterations slow down brute-force attacks.
-- The integrity hash is checked before the decrypted file is written, protecting against silent corruption or tampering.
+## Notes
 
----
+- Keep a separate backup of important original files.
+- Use a strong, unique password and protect it; the tool does not store passwords.
+- The current implementation reads the complete file into memory and limits a single file to the OpenSSL \`int\` input-size boundary.
+- RSA key generation is a separate utility; it is not used by the password-based file encryption flow.
 
-## 🎓 Learning Goals
-
-This project demonstrates practical cryptography concepts relevant to cybersecurity:
-
-1. Symmetric encryption with **AES**
-2. Password-based key derivation with **PBKDF2**
-3. Message integrity with **SHA-256**
-4. Asymmetric key generation with **RSA**
-5. Secure coding practices (zeroing memory, hidden input)
-
----
-
-## 📜 License
-
-MIT License – free to use, modify, and distribute.
-
----
-
-*Built with ❤️ by hemanathan115*
-
-
-## Repository Quick Start
-
-Clone the canonical repository:
-
-```bash
-git clone https://github.com/cyberworlduniversity/File_Encryption_Tool.git
-cd File_Encryption_Tool
-```
-
-### Requirements
-
-- C++17 compiler and OpenSSL development headers/libraries
-
-### Install dependencies / compile
-
-```bash
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic File_Encryption_Tool.cpp -lssl -lcrypto -o file_enc
-./file_enc
-```
-
-### Run
-
-```bash
-Run the executable with its documented subcommands (encrypt, decrypt, verify, genrsa). Test first with a disposable copy of a file and keep backups of originals.
-```
-
-Use the examples and options documented above; run a small, authorized test first. A dedicated automated test suite is not currently documented in this repository, so do not interpret a successful compile as proof of runtime correctness.
-
-Protect encryption passwords and private keys. The documented AES-CBC design should not be assumed authenticated; use authenticated encryption for new high-value data.
-
-### Program flow
-
-```mermaid
-flowchart TD
-    A[Start] --> B[Check prerequisites]
-    B --> C{Build and input valid?}
-    C -- No --> D[Report error and stop]
-    C -- Yes --> E[Execute File Encryption Tool task]
-    E --> F[Generate output or findings]
-    F --> G[Review results]
-    G --> H[Exit]
-    D --> H
-```
+MIT License.
