@@ -1,5 +1,15 @@
 # 🔐 File Encryption Tool
 
+
+## Get this repository
+
+Clone the current project (this repository's canonical GitHub URL), then follow the installation and usage steps below.
+
+```bash
+git clone https://github.com/cyberworlduniversity/File_Encryption_Tool.git
+cd File_Encryption_Tool
+```
+
 > **Author:** hemanathan115  
 > **Language:** C++17  
 > **Library:** OpenSSL  
