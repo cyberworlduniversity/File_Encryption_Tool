@@ -34,6 +34,8 @@
 #include <cstring>
 #include <termios.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -458,28 +460,72 @@ void verify_file(const std::string& path)
 void generate_rsa_keypair(const std::string& priv_path,
                           const std::string& pub_path)
 {
-    RSA*    rsa  = RSA_new();
-    BIGNUM* bn   = BN_new();
-    BN_set_word(bn, RSA_F4);
-
-    if (!RSA_generate_key_ex(rsa, RSA_KEY_BITS, bn, nullptr))
+    RSA* rsa = RSA_new();
+    BIGNUM* bn = BN_new();
+    if (!rsa || !bn)
+    {
+        RSA_free(rsa);
+        BN_free(bn);
+        ssl_error("RSA key allocation failed");
+    }
+    if (!BN_set_word(bn, RSA_F4) ||
+        !RSA_generate_key_ex(rsa, RSA_KEY_BITS, bn, nullptr))
+    {
+        RSA_free(rsa);
+        BN_free(bn);
         ssl_error("RSA key generation failed");
+    }
 
-    // Write private key
-    FILE* fp = fopen(priv_path.c_str(), "wb");
-    PEM_write_RSAPrivateKey(fp, rsa, nullptr, nullptr, 0, nullptr, nullptr);
-    fclose(fp);
+    // Create private key files with owner-only permissions from the start.
+    int priv_fd = open(priv_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (priv_fd < 0)
+    {
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Cannot create private key file: " + priv_path);
+    }
+    FILE* priv_fp = fdopen(priv_fd, "wb");
+    if (!priv_fp)
+    {
+        close(priv_fd);
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Cannot open private key stream: " + priv_path);
+    }
+    const int private_ok = PEM_write_RSAPrivateKey(priv_fp, rsa, nullptr, nullptr, 0, nullptr, nullptr);
+    const int private_close_ok = fclose(priv_fp);
+    if (!private_ok || private_close_ok != 0)
+    {
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Failed to write private key file: " + priv_path);
+    }
 
-    // Write public key
-    fp = fopen(pub_path.c_str(), "wb");
-    PEM_write_RSA_PUBKEY(fp, rsa);
-    fclose(fp);
-
+    int pub_fd = open(pub_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
+                      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (pub_fd < 0)
+    {
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Cannot create public key file: " + pub_path);
+    }
+    FILE* pub_fp = fdopen(pub_fd, "wb");
+    if (!pub_fp)
+    {
+        close(pub_fd);
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Cannot open public key stream: " + pub_path);
+    }
+    const int public_ok = PEM_write_RSA_PUBKEY(pub_fp, rsa);
+    const int public_close_ok = fclose(pub_fp);
     RSA_free(rsa);
     BN_free(bn);
+    if (!public_ok || public_close_ok != 0)
+        throw std::runtime_error("Failed to write public key file: " + pub_path);
 
     std::cout << "[OK] RSA-" << RSA_KEY_BITS << " key pair generated\n"
-              << "     Private: " << priv_path << "\n"
+              << "     Private: " << priv_path << " (owner-only permissions)\n"
               << "     Public : " << pub_path  << "\n";
 }
 
