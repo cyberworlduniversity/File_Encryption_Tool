@@ -13,6 +13,8 @@
  *  Usage:
  *    ./file_enc encrypt <input_file> <output_file>
  *    ./file_enc decrypt <input_file> <output_file>
+ *    ./file_enc decrypt-legacy <input_file> <output_file>
+ *    ./file_enc self-test
  *    ./file_enc verify  <file>
  * ============================================================
  */
