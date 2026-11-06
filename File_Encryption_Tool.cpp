@@ -214,6 +214,24 @@ void write_file(const std::string& path, const std::vector<unsigned char>& data)
     }
 }
 
+
+std::vector<unsigned char> read_remaining_limited(std::ifstream& in)
+{
+    const std::streampos start = in.tellg();
+    if (start < 0) throw std::runtime_error("Could not determine encrypted payload position.");
+    in.seekg(0, std::ios::end);
+    const std::streampos finish = in.tellg();
+    if (finish < start) throw std::runtime_error("Encrypted file size is invalid.");
+    const std::streamoff size = finish - start;
+    if (size > INT_MAX)
+        throw std::runtime_error("Encrypted file is too large for this implementation.");
+    in.seekg(start);
+    std::vector<unsigned char> data(static_cast<size_t>(size));
+    if (size > 0 && !in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size)))
+        throw std::runtime_error("Failed while reading encrypted payload.");
+    return data;
+}
+
 // ─── Authenticated AES-256-GCM helpers ────────────────────────────────────────
 std::vector<unsigned char> make_aad(const unsigned char* salt, const unsigned char* iv)
 {
@@ -399,8 +417,7 @@ void decrypt_file(const std::string& in_path, const std::string& out_path)
     in.read(reinterpret_cast<char*>(tag), GCM_TAG_LEN);
     if (!in) throw std::runtime_error("Encrypted file header is truncated.");
 
-    std::vector<unsigned char> ciphertext(
-        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::vector<unsigned char> ciphertext = read_remaining_limited(in);
 
     std::string password = get_password("Enter decryption password: ");
     unsigned char key[AES_KEY_LEN];
@@ -435,8 +452,7 @@ void decrypt_legacy_file(const std::string& in_path, const std::string& out_path
     in.read(reinterpret_cast<char*>(stored_hash), SHA256_LEN);
     if (!in) throw std::runtime_error("Legacy encrypted file header is truncated.");
 
-    std::vector<unsigned char> ciphertext(
-        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::vector<unsigned char> ciphertext = read_remaining_limited(in);
     if (ciphertext.size() > static_cast<size_t>(INT_MAX))
         throw std::runtime_error("Legacy file is too large to decrypt.");
 
