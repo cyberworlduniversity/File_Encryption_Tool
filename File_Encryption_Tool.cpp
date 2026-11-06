@@ -41,6 +41,9 @@
 #include <stdexcept>
 #include <climits>
 #include <algorithm>
+#include <filesystem>
+#include <cerrno>
+#include <cstring>
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 constexpr int AES_KEY_LEN   = 32;   // AES-256
@@ -166,10 +169,49 @@ std::vector<unsigned char> read_file(const std::string& path)
 // ─── Write vector to file ─────────────────────────────────────────────────────
 void write_file(const std::string& path, const std::vector<unsigned char>& data)
 {
-    std::ofstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error("Cannot write: " + path);
-    f.write(reinterpret_cast<const char*>(data.data()),
-            static_cast<std::streamsize>(data.size()));
+    if (path.empty()) throw std::runtime_error("Output path must not be empty.");
+
+    const std::filesystem::path target(path);
+    const std::filesystem::path parent = target.has_parent_path()
+        ? target.parent_path() : std::filesystem::path(".");
+    std::filesystem::path temp = parent / (target.filename().string() + ".tmp.XXXXXX");
+    std::string temp_template = temp.string();
+    std::vector<char> temp_name(temp_template.begin(), temp_template.end());
+    temp_name.push_back('\0');
+
+    int fd = mkstemp(temp_name.data());
+    if (fd < 0)
+        throw std::runtime_error("Cannot create secure temporary output file: " + std::string(std::strerror(errno)));
+
+    const std::string temp_path(temp_name.data());
+    bool committed = false;
+    try {
+        size_t offset = 0;
+        while (offset < data.size()) {
+            const ssize_t written = ::write(fd, data.data() + offset, data.size() - offset);
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0)
+                throw std::runtime_error("Failed while writing output file.");
+            offset += static_cast<size_t>(written);
+        }
+
+        if (fsync(fd) != 0)
+            throw std::runtime_error("Failed to flush output file.");
+        if (close(fd) != 0) {
+            fd = -1;
+            throw std::runtime_error("Failed to close output file.");
+        }
+        fd = -1;
+
+        // Atomic rename replaces a destination symlink itself instead of following it.
+        if (rename(temp_path.c_str(), path.c_str()) != 0)
+            throw std::runtime_error("Could not safely replace output file: " + std::string(std::strerror(errno)));
+        committed = true;
+    } catch (...) {
+        if (fd >= 0) close(fd);
+        if (!committed) unlink(temp_path.c_str());
+        throw;
+    }
 }
 
 // ─── Authenticated AES-256-GCM helpers ────────────────────────────────────────
@@ -496,7 +538,7 @@ void generate_rsa_keypair(const std::string& priv_path,
     }
 
     // Create private key files with owner-only permissions from the start.
-    int priv_fd = open(priv_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    int priv_fd = open(priv_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
     if (priv_fd < 0)
     {
         RSA_free(rsa);
@@ -527,7 +569,7 @@ void generate_rsa_keypair(const std::string& priv_path,
         throw std::runtime_error("Failed to write private key file: " + priv_path);
     }
 
-    int pub_fd = open(pub_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
+    int pub_fd = open(pub_path.c_str(), O_WRONLY | O_CREAT | O_EXCL,
                       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if (pub_fd < 0)
     {
