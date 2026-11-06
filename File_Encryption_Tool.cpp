@@ -94,7 +94,7 @@ void derive_key_iv(const std::string& password,
     {
         ssl_error("PBKDF2 key derivation failed");
     }
-    // Split: first AES_KEY_LEN bytes → key, next AES_IV_LEN bytes → iv
+    // Split: first AES_KEY_LEN bytes → key, next LEGACY_IV_LEN bytes → legacy IV
     std::memcpy(iv, key + AES_KEY_LEN, LEGACY_IV_LEN);
 }
 
@@ -142,10 +142,13 @@ std::vector<unsigned char> read_file(const std::string& path)
 {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) throw std::runtime_error("Cannot open: " + path);
-    auto size = f.tellg();
+    const std::streamoff size = f.tellg();
+    if (size < 0 || size > INT_MAX)
+        throw std::runtime_error("Input file is too large for this encryption implementation.");
     f.seekg(0);
     std::vector<unsigned char> data(static_cast<size_t>(size));
-    f.read(reinterpret_cast<char*>(data.data()), size);
+    if (size > 0 && !f.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size)))
+        throw std::runtime_error("Failed while reading input file: " + path);
     return data;
 }
 
