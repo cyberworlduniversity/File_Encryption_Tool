@@ -484,6 +484,13 @@ void generate_rsa_keypair(const std::string& priv_path,
         BN_free(bn);
         throw std::runtime_error("Cannot create private key file: " + priv_path);
     }
+    if (fchmod(priv_fd, S_IRUSR | S_IWUSR) != 0)
+    {
+        close(priv_fd);
+        RSA_free(rsa);
+        BN_free(bn);
+        throw std::runtime_error("Cannot restrict private key file permissions: " + priv_path);
+    }
     FILE* priv_fp = fdopen(priv_fd, "wb");
     if (!priv_fp)
     {
