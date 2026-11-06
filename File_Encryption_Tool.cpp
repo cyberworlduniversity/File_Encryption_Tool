@@ -3,7 +3,7 @@
  *  File Encryption Tool
  *  Author  : hemanathan115
  *  Language: C++17
- *  Library : OpenSSL (AES-256-CBC, RSA-2048, SHA-256)
+ *  Library : OpenSSL (AES-256-GCM, RSA-2048, SHA-256)
  * ============================================================
  *
  *  Compile:
@@ -38,13 +38,17 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 constexpr int AES_KEY_LEN   = 32;   // AES-256
-constexpr int AES_IV_LEN    = 16;
+constexpr int AES_IV_LEN    = 12;
+constexpr int LEGACY_IV_LEN = 16;
+constexpr int GCM_TAG_LEN   = 16;
+constexpr int PBKDF2_ITERATIONS = 600000;
 constexpr int SALT_LEN      = 16;
 constexpr int SHA256_LEN    = 32;
 constexpr int RSA_KEY_BITS  = 2048;
 
 // Magic header written at the start of every encrypted file
-const std::string MAGIC = "FENC1";
+const std::string MAGIC = "FENC2";
+const std::string LEGACY_MAGIC = "FENC1";
 
 // ─── Utility: print OpenSSL errors ────────────────────────────────────────────
 static void ssl_error(const std::string& msg)
@@ -81,15 +85,26 @@ void derive_key_iv(const std::string& password,
     if (!PKCS5_PBKDF2_HMAC(password.c_str(),
                             static_cast<int>(password.size()),
                             salt, SALT_LEN,
-                            100000,          // iterations
+                            100000,          // legacy FENC1 iterations
                             EVP_sha256(),
-                            AES_KEY_LEN + AES_IV_LEN,
+                            AES_KEY_LEN + LEGACY_IV_LEN,
                             key))            // output buffer (key || iv)
     {
         ssl_error("PBKDF2 key derivation failed");
     }
     // Split: first AES_KEY_LEN bytes → key, next AES_IV_LEN bytes → iv
-    std::memcpy(iv, key + AES_KEY_LEN, AES_IV_LEN);
+    std::memcpy(iv, key + AES_KEY_LEN, LEGACY_IV_LEN);
+}
+
+
+void derive_key(const std::string& password, const unsigned char* salt, unsigned char* key)
+{
+    if (password.empty() || password.size() > static_cast<size_t>(INT_MAX))
+        throw std::runtime_error("Password length is invalid.");
+    if (!PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.size()),
+                           salt, SALT_LEN, PBKDF2_ITERATIONS, EVP_sha256(),
+                           AES_KEY_LEN, key))
+        ssl_error("PBKDF2 key derivation failed");
 }
 
 // ─── SHA-256 hash of a file ───────────────────────────────────────────────────
