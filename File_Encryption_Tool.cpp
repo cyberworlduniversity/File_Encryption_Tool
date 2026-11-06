@@ -442,11 +442,23 @@ void crypto_self_test()
     if (!aes_gcm_decrypt(key, iv, aad, ciphertext, tag, recovered) || recovered != plaintext)
         throw std::runtime_error("AES-GCM round-trip self-test failed.");
 
-    if (!ciphertext.empty()) ciphertext[0] ^= 0x01;
-    if (aes_gcm_decrypt(key, iv, aad, ciphertext, tag, recovered))
-        throw std::runtime_error("AES-GCM tamper-detection self-test failed.");
+    auto tampered_ciphertext = ciphertext;
+    if (!tampered_ciphertext.empty()) tampered_ciphertext[0] ^= 0x01;
+    if (aes_gcm_decrypt(key, iv, aad, tampered_ciphertext, tag, recovered))
+        throw std::runtime_error("AES-GCM ciphertext tamper test failed.");
 
-    std::cout << "[OK] AES-256-GCM round-trip and tamper-detection tests passed.\n";
+    auto tampered_aad = aad;
+    tampered_aad[0] ^= 0x01;
+    if (aes_gcm_decrypt(key, iv, tampered_aad, ciphertext, tag, recovered))
+        throw std::runtime_error("AES-GCM metadata tamper test failed.");
+
+    unsigned char tampered_tag[GCM_TAG_LEN];
+    std::memcpy(tampered_tag, tag, GCM_TAG_LEN);
+    tampered_tag[0] ^= 0x01;
+    if (aes_gcm_decrypt(key, iv, aad, ciphertext, tampered_tag, recovered))
+        throw std::runtime_error("AES-GCM authentication-tag tamper test failed.");
+
+    std::cout << "[OK] AES-256-GCM round-trip, ciphertext, metadata, and tag tests passed.\n";
 }
 
 // ─── SHA-256 Verify ───────────────────────────────────────────────────────────
