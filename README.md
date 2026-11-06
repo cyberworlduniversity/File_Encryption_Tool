@@ -163,3 +163,48 @@ MIT License – free to use, modify, and distribute.
 ---
 
 *Built with ❤️ by hemanathan115*
+
+
+## Repository Quick Start
+
+Clone the canonical repository:
+
+```bash
+git clone https://github.com/cyberworlduniversity/File_Encryption_Tool.git
+cd File_Encryption_Tool
+```
+
+### Requirements
+
+- C++17 compiler and OpenSSL development headers/libraries
+
+### Install dependencies / compile
+
+```bash
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic File_Encryption_Tool.cpp -lssl -lcrypto -o file_enc
+./file_enc
+```
+
+### Run
+
+```bash
+Run the executable with its documented subcommands (encrypt, decrypt, verify, genrsa). Test first with a disposable copy of a file and keep backups of originals.
+```
+
+Use the examples and options documented above; run a small, authorized test first. A dedicated automated test suite is not currently documented in this repository, so do not interpret a successful compile as proof of runtime correctness.
+
+Protect encryption passwords and private keys. The documented AES-CBC design should not be assumed authenticated; use authenticated encryption for new high-value data.
+
+### Program flow
+
+```mermaid
+flowchart TD
+    A[Start] --> B[Check prerequisites]
+    B --> C{Build and input valid?}
+    C -- No --> D[Report error and stop]
+    C -- Yes --> E[Execute File Encryption Tool task]
+    E --> F[Generate output or findings]
+    F --> G[Review results]
+    G --> H[Exit]
+    D --> H
+```
