@@ -1,0 +1,20 @@
+name: C++ OpenSSL CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSL headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Compile C++17 source
+        run: g++ -std=c++17 -Wall -Wextra -fsyntax-only File_Encryption_Tool.cpp
