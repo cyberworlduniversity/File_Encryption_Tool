@@ -35,6 +35,8 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <climits>
+#include <algorithm>
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 constexpr int AES_KEY_LEN   = 32;   // AES-256
@@ -156,142 +158,288 @@ void write_file(const std::string& path, const std::vector<unsigned char>& data)
             static_cast<std::streamsize>(data.size()));
 }
 
-// ─── AES-256-CBC Encrypt ──────────────────────────────────────────────────────
-/*
- *  Output file layout:
- *  [ MAGIC (5 bytes) ][ SALT (16) ][ SHA256 of plaintext (32) ][ ciphertext ]
- */
+// ─── Authenticated AES-256-GCM helpers ────────────────────────────────────────
+std::vector<unsigned char> make_aad(const unsigned char* salt, const unsigned char* iv)
+{
+    std::vector<unsigned char> aad(MAGIC.begin(), MAGIC.end());
+    aad.insert(aad.end(), salt, salt + SALT_LEN);
+    aad.insert(aad.end(), iv, iv + AES_IV_LEN);
+    return aad;
+}
+
+std::vector<unsigned char> aes_gcm_encrypt(
+    const unsigned char* key,
+    const unsigned char* iv,
+    const std::vector<unsigned char>& aad,
+    const std::vector<unsigned char>& plaintext,
+    unsigned char* tag)
+{
+    if (aad.size() > static_cast<size_t>(INT_MAX) ||
+        plaintext.size() > static_cast<size_t>(INT_MAX))
+        throw std::runtime_error("Input is too large for this encryption implementation.");
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) ssl_error("Could not allocate encryption context");
+
+    int len = 0;
+    int total = 0;
+    std::vector<unsigned char> ciphertext(plaintext.size() + 16);
+
+    if (!EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) ||
+        !EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, AES_IV_LEN, nullptr) ||
+        !EVP_EncryptInit_ex(ctx, nullptr, nullptr, key, iv) ||
+        !EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())))
+    {
+        EVP_CIPHER_CTX_free(ctx);
+        ssl_error("AES-GCM initialization failed");
+    }
+
+    if (!plaintext.empty())
+    {
+        if (!EVP_EncryptUpdate(ctx, ciphertext.data(), &len, plaintext.data(),
+                               static_cast<int>(plaintext.size())))
+        {
+            EVP_CIPHER_CTX_free(ctx);
+            ssl_error("AES-GCM encryption failed");
+        }
+        total = len;
+    }
+
+    if (!EVP_EncryptFinal_ex(ctx, ciphertext.data() + total, &len))
+    {
+        EVP_CIPHER_CTX_free(ctx);
+        ssl_error("AES-GCM finalization failed");
+    }
+    total += len;
+
+    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN, tag))
+    {
+        EVP_CIPHER_CTX_free(ctx);
+        ssl_error("Could not obtain AES-GCM authentication tag");
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    ciphertext.resize(static_cast<size_t>(total));
+    return ciphertext;
+}
+
+bool aes_gcm_decrypt(
+    const unsigned char* key,
+    const unsigned char* iv,
+    const std::vector<unsigned char>& aad,
+    const std::vector<unsigned char>& ciphertext,
+    const unsigned char* tag,
+    std::vector<unsigned char>& plaintext)
+{
+    if (aad.size() > static_cast<size_t>(INT_MAX) ||
+        ciphertext.size() > static_cast<size_t>(INT_MAX))
+        return false;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return false;
+
+    int len = 0;
+    int total = 0;
+    plaintext.assign(ciphertext.size() + 16, 0);
+
+    if (!EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) ||
+        !EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, AES_IV_LEN, nullptr) ||
+        !EVP_DecryptInit_ex(ctx, nullptr, nullptr, key, iv) ||
+        !EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(), static_cast<int>(aad.size())))
+    {
+        EVP_CIPHER_CTX_free(ctx);
+        plaintext.clear();
+        return false;
+    }
+
+    if (!ciphertext.empty())
+    {
+        if (!EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext.data(),
+                               static_cast<int>(ciphertext.size())))
+        {
+            EVP_CIPHER_CTX_free(ctx);
+            plaintext.clear();
+            return false;
+        }
+        total = len;
+    }
+
+    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN,
+                             const_cast<unsigned char*>(tag)))
+    {
+        EVP_CIPHER_CTX_free(ctx);
+        plaintext.clear();
+        return false;
+    }
+
+    const int authenticated = EVP_DecryptFinal_ex(ctx, plaintext.data() + total, &len);
+    EVP_CIPHER_CTX_free(ctx);
+    if (authenticated <= 0)
+    {
+        plaintext.clear();
+        return false;
+    }
+
+    total += len;
+    plaintext.resize(static_cast<size_t>(total));
+    return true;
+}
+
+// FENC2 format: MAGIC | SALT | NONCE | GCM TAG | CIPHERTEXT.
+// The magic, salt, and nonce are authenticated as additional data.
 void encrypt_file(const std::string& in_path, const std::string& out_path)
 {
     std::string password = get_password("Enter encryption password: ");
     std::string confirm  = get_password("Confirm password         : ");
-    if (password != confirm)
-        throw std::runtime_error("Passwords do not match!");
+    if (password.empty() || password != confirm)
+        throw std::runtime_error("A non-empty matching password is required.");
 
-    // Generate random salt
     unsigned char salt[SALT_LEN];
-    if (!RAND_bytes(salt, SALT_LEN))
-        ssl_error("RAND_bytes failed");
+    unsigned char iv[AES_IV_LEN];
+    unsigned char key[AES_KEY_LEN];
+    unsigned char tag[GCM_TAG_LEN];
 
-    // Derive key + IV
-    unsigned char key_iv[AES_KEY_LEN + AES_IV_LEN];
-    if (!PKCS5_PBKDF2_HMAC(password.c_str(),
-                            static_cast<int>(password.size()),
-                            salt, SALT_LEN, 100000,
-                            EVP_sha256(),
-                            AES_KEY_LEN + AES_IV_LEN, key_iv))
-        ssl_error("PBKDF2 failed");
+    if (!RAND_bytes(salt, SALT_LEN) || !RAND_bytes(iv, AES_IV_LEN))
+        ssl_error("Secure random generation failed");
 
-    unsigned char* key = key_iv;
-    unsigned char* iv  = key_iv + AES_KEY_LEN;
-
-    // Read plaintext
+    derive_key(password, salt, key);
     auto plaintext = read_file(in_path);
+    auto aad = make_aad(salt, iv);
+    auto ciphertext = aes_gcm_encrypt(key, iv, aad, plaintext, tag);
 
-    // Compute SHA-256 integrity hash
-    std::vector<unsigned char> hash(SHA256_LEN);
-    SHA256(plaintext.data(), plaintext.size(), hash.data());
-
-    // AES-256-CBC encrypt
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
-
-    std::vector<unsigned char> ciphertext(plaintext.size() + AES_BLOCK_SIZE);
-    int out_len1 = 0, out_len2 = 0;
-
-    EVP_EncryptUpdate(ctx,
-                      ciphertext.data(), &out_len1,
-                      plaintext.data(),  static_cast<int>(plaintext.size()));
-    EVP_EncryptFinal_ex(ctx, ciphertext.data() + out_len1, &out_len2);
-    EVP_CIPHER_CTX_free(ctx);
-
-    ciphertext.resize(static_cast<size_t>(out_len1 + out_len2));
-
-    // Write output: MAGIC | SALT | HASH | CIPHERTEXT
     std::ofstream out(out_path, std::ios::binary);
     if (!out) throw std::runtime_error("Cannot create output file: " + out_path);
 
-    out.write(MAGIC.c_str(),                             MAGIC.size());
-    out.write(reinterpret_cast<char*>(salt),             SALT_LEN);
-    out.write(reinterpret_cast<char*>(hash.data()),      SHA256_LEN);
-    out.write(reinterpret_cast<char*>(ciphertext.data()),
-              static_cast<std::streamsize>(ciphertext.size()));
+    out.write(MAGIC.data(), static_cast<std::streamsize>(MAGIC.size()));
+    out.write(reinterpret_cast<const char*>(salt), SALT_LEN);
+    out.write(reinterpret_cast<const char*>(iv), AES_IV_LEN);
+    out.write(reinterpret_cast<const char*>(tag), GCM_TAG_LEN);
+    if (!ciphertext.empty())
+        out.write(reinterpret_cast<const char*>(ciphertext.data()),
+                  static_cast<std::streamsize>(ciphertext.size()));
+    if (!out) throw std::runtime_error("Failed while writing encrypted output.");
 
-    std::cout << "[OK] Encrypted -> " << out_path << "\n";
-    std::cout << "     SHA-256 of original: " << hex_string(hash) << "\n";
+    std::cout << "[OK] Authenticated AES-256-GCM encryption -> " << out_path << "\n";
 }
 
-// ─── AES-256-CBC Decrypt ──────────────────────────────────────────────────────
+// New-format decryption refuses legacy CBC files. Use decrypt-legacy explicitly
+// only when recovering a trusted FENC1 file.
 void decrypt_file(const std::string& in_path, const std::string& out_path)
 {
     std::ifstream in(in_path, std::ios::binary);
     if (!in) throw std::runtime_error("Cannot open encrypted file: " + in_path);
 
-    // Read & verify magic
     char magic_buf[6] = {0};
     in.read(magic_buf, static_cast<std::streamsize>(MAGIC.size()));
-    if (MAGIC != magic_buf)
-        throw std::runtime_error("Not a valid encrypted file (bad magic)");
+    if (std::string(magic_buf, MAGIC.size()) == LEGACY_MAGIC)
+        throw std::runtime_error("Legacy FENC1 file: use decrypt-legacy only for a trusted file.");
+    if (!in || std::string(magic_buf, MAGIC.size()) != MAGIC)
+        throw std::runtime_error("Not a valid FENC2 encrypted file (bad magic).");
 
-    // Read salt and stored hash
+    unsigned char salt[SALT_LEN];
+    unsigned char iv[AES_IV_LEN];
+    unsigned char tag[GCM_TAG_LEN];
+    in.read(reinterpret_cast<char*>(salt), SALT_LEN);
+    in.read(reinterpret_cast<char*>(iv), AES_IV_LEN);
+    in.read(reinterpret_cast<char*>(tag), GCM_TAG_LEN);
+    if (!in) throw std::runtime_error("Encrypted file header is truncated.");
+
+    std::vector<unsigned char> ciphertext(
+        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    std::string password = get_password("Enter decryption password: ");
+    unsigned char key[AES_KEY_LEN];
+    derive_key(password, salt, key);
+
+    auto aad = make_aad(salt, iv);
+    std::vector<unsigned char> plaintext;
+    if (!aes_gcm_decrypt(key, iv, aad, ciphertext, tag, plaintext))
+        throw std::runtime_error("Authentication failed: wrong password or file tampering detected.");
+
+    write_file(out_path, plaintext);
+    std::cout << "[OK] Authenticated file decrypted -> " << out_path << "\n";
+}
+
+// Explicit compatibility path for older FENC1 files. CBC plus an unkeyed
+// SHA-256 field is not authenticated encryption and cannot reliably detect
+// malicious tampering. Do not use this path for untrusted files.
+void decrypt_legacy_file(const std::string& in_path, const std::string& out_path)
+{
+    std::cerr << "[WARNING] FENC1 is a legacy unauthenticated format. Only recover files you trust.\n";
+    std::ifstream in(in_path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot open legacy encrypted file: " + in_path);
+
+    char magic_buf[6] = {0};
+    in.read(magic_buf, static_cast<std::streamsize>(LEGACY_MAGIC.size()));
+    if (!in || std::string(magic_buf, LEGACY_MAGIC.size()) != LEGACY_MAGIC)
+        throw std::runtime_error("Not a valid FENC1 legacy file.");
+
     unsigned char salt[SALT_LEN];
     unsigned char stored_hash[SHA256_LEN];
-    in.read(reinterpret_cast<char*>(salt),        SALT_LEN);
+    in.read(reinterpret_cast<char*>(salt), SALT_LEN);
     in.read(reinterpret_cast<char*>(stored_hash), SHA256_LEN);
+    if (!in) throw std::runtime_error("Legacy encrypted file header is truncated.");
 
-    // Read ciphertext
     std::vector<unsigned char> ciphertext(
-        (std::istreambuf_iterator<char>(in)),
-         std::istreambuf_iterator<char>());
+        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (ciphertext.size() > static_cast<size_t>(INT_MAX))
+        throw std::runtime_error("Legacy file is too large to decrypt.");
 
-    // Get password
-    std::string password = get_password("Enter decryption password: ");
+    std::string password = get_password("Enter legacy decryption password: ");
+    unsigned char key_iv[AES_KEY_LEN + LEGACY_IV_LEN];
+    unsigned char iv[LEGACY_IV_LEN];
+    derive_key_iv(password, salt, key_iv, iv);
 
-    // Derive key + IV
-    unsigned char key_iv[AES_KEY_LEN + AES_IV_LEN];
-    if (!PKCS5_PBKDF2_HMAC(password.c_str(),
-                            static_cast<int>(password.size()),
-                            salt, SALT_LEN, 100000,
-                            EVP_sha256(),
-                            AES_KEY_LEN + AES_IV_LEN, key_iv))
-        ssl_error("PBKDF2 failed");
-
-    unsigned char* key = key_iv;
-    unsigned char* iv  = key_iv + AES_KEY_LEN;
-
-    // AES-256-CBC decrypt
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
-
-    std::vector<unsigned char> plaintext(ciphertext.size());
-    int out_len1 = 0, out_len2 = 0;
-
-    if (!EVP_DecryptUpdate(ctx,
-                           plaintext.data(), &out_len1,
-                           ciphertext.data(),
-                           static_cast<int>(ciphertext.size())))
+    if (!ctx) ssl_error("Could not allocate legacy decryption context");
+    if (!EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key_iv, iv))
     {
         EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("Decryption failed – wrong password?");
+        ssl_error("Legacy CBC initialization failed");
     }
-    if (!EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len1, &out_len2))
+
+    std::vector<unsigned char> plaintext(ciphertext.size() + AES_BLOCK_SIZE);
+    int out_len1 = 0, out_len2 = 0;
+    if (!EVP_DecryptUpdate(ctx, plaintext.data(), &out_len1, ciphertext.data(),
+                           static_cast<int>(ciphertext.size())) ||
+        !EVP_DecryptFinal_ex(ctx, plaintext.data() + out_len1, &out_len2))
     {
         EVP_CIPHER_CTX_free(ctx);
-        throw std::runtime_error("Decryption final failed – wrong password or corrupted file");
+        throw std::runtime_error("Legacy decryption failed: wrong password or corrupted file.");
     }
     EVP_CIPHER_CTX_free(ctx);
     plaintext.resize(static_cast<size_t>(out_len1 + out_len2));
 
-    // Integrity check: compare SHA-256
     unsigned char computed_hash[SHA256_LEN];
     SHA256(plaintext.data(), plaintext.size(), computed_hash);
-
     if (std::memcmp(stored_hash, computed_hash, SHA256_LEN) != 0)
-        throw std::runtime_error("Integrity check FAILED! File may be corrupted or tampered.");
+        throw std::runtime_error("Legacy checksum mismatch.");
 
     write_file(out_path, plaintext);
-    std::cout << "[OK] Decrypted -> " << out_path << "\n";
-    std::cout << "     Integrity check: PASSED\n";
+    std::cout << "[OK] Legacy file recovered -> " << out_path << "\n";
+}
+
+void crypto_self_test()
+{
+    unsigned char key[AES_KEY_LEN];
+    unsigned char iv[AES_IV_LEN];
+    unsigned char tag[GCM_TAG_LEN];
+    if (!RAND_bytes(key, AES_KEY_LEN) || !RAND_bytes(iv, AES_IV_LEN))
+        ssl_error("Self-test random generation failed");
+
+    const std::string message = "FENC2 authenticated encryption self-test";
+    std::vector<unsigned char> plaintext(message.begin(), message.end());
+    const std::vector<unsigned char> aad(MAGIC.begin(), MAGIC.end());
+    auto ciphertext = aes_gcm_encrypt(key, iv, aad, plaintext, tag);
+
+    std::vector<unsigned char> recovered;
+    if (!aes_gcm_decrypt(key, iv, aad, ciphertext, tag, recovered) || recovered != plaintext)
+        throw std::runtime_error("AES-GCM round-trip self-test failed.");
+
+    if (!ciphertext.empty()) ciphertext[0] ^= 0x01;
+    if (aes_gcm_decrypt(key, iv, aad, ciphertext, tag, recovered))
+        throw std::runtime_error("AES-GCM tamper-detection self-test failed.");
+
+    std::cout << "[OK] AES-256-GCM round-trip and tamper-detection tests passed.\n";
 }
 
 // ─── SHA-256 Verify ───────────────────────────────────────────────────────────
