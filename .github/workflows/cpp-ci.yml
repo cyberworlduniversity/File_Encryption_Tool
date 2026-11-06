@@ -10,11 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  compile:
+  compile-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install OpenSSL headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y g++ libssl-dev
       - name: Compile C++17 source
-        run: g++ -std=c++17 -Wall -Wextra -fsyntax-only File_Encryption_Tool.cpp
+        run: g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wno-deprecated-declarations File_Encryption_Tool.cpp -lssl -lcrypto -o file_enc
+      - name: Run AES-GCM round-trip and tamper tests
+        run: ./file_enc self-test
