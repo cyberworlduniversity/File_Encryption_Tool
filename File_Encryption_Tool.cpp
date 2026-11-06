@@ -67,18 +67,25 @@ static void ssl_error(const std::string& msg)
 // ─── Secure password input (no echo) ──────────────────────────────────────────
 std::string get_password(const std::string& prompt)
 {
-    struct termios oldt, newt;
-    tcgetattr(STDIN_FILENO, &oldt);
+    struct termios oldt{}, newt{};
+    if (tcgetattr(STDIN_FILENO, &oldt) != 0)
+        throw std::runtime_error("Password input requires an interactive terminal.");
+
     newt = oldt;
     newt.c_lflag &= ~ECHO;
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &newt) != 0)
+        throw std::runtime_error("Could not disable terminal echo for password input.");
 
     std::cout << prompt;
     std::string password;
-    std::getline(std::cin, password);
-
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    const bool input_ok = static_cast<bool>(std::getline(std::cin, password));
+    const int restore_status = tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     std::cout << "\n";
+
+    if (restore_status != 0)
+        throw std::runtime_error("Could not restore terminal settings after password input.");
+    if (!input_ok)
+        throw std::runtime_error("Could not read password input.");
     return password;
 }
 
